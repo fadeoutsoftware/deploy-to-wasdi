@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deploytowasdi"
+name = "deploy-to-wasdi"
 version = "0.1.0"
 description = "A flexible deployment preparation tool for WASDI applications."
 readme = "README.md"
@@ -12,7 +12,7 @@ dependencies = [
     "PyYAML>=6.0",
 ]
 
-# This tells pip to create a terminal command called "deploytowasdi"
+# This tells pip to create a terminal command called "deploy-to-wasdi"
 # that triggers the main() function in cli.py
 [project.scripts]
-deploytowasdi = "wasdi_deploy.cli:main"
+deploy-to-wasdi = "wasdi_deploy.cli:main"
