@@ -1,2 +1,3 @@
 # ignore any config.json that we use in WASDI, so we don't commit passwords
 [cC][oO][nN][fF][iI][gG].[jJ][sS][oO][nN]
+.vscode/settings.json
