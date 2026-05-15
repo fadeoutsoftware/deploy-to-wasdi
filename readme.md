@@ -1,0 +1,1 @@
+Tool to ease the deployment of applications to WASDI
