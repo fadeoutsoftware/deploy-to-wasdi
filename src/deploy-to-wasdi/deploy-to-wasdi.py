@@ -2,6 +2,7 @@ import os
 import shutil
 import yaml
 import argparse
+import importlib.util
 from pathlib import Path
 
 def load_config(config_path: str) -> dict:
@@ -55,7 +56,7 @@ def prepare_deployment(config_file: str):
     # Copy custom local modules
     custom_modules = config.get('custom_modules', [])
     if custom_modules:
-        print("📦 Copying custom modules...")
+        print("📦 Copying custom modules by path...")
         for mod_path_str in custom_modules:
             mod_path = Path(mod_path_str)
             if mod_path.is_file():
@@ -66,6 +67,29 @@ def prepare_deployment(config_file: str):
                 print(f"   - Added directory: {mod_path.name}")
             else:
                 print(f"⚠️  Warning: Custom module {mod_path_str} not found!")
+
+    # Copy installed custom modules (e.g., editable installs)
+    installed_modules = config.get('installed_modules', [])
+    if installed_modules:
+        print("📦 Copying installed custom modules from environment...")
+        for mod_name in installed_modules:
+            spec = importlib.util.find_spec(mod_name)
+            if spec is None:
+                print(f"⚠️  Warning: Installed module '{mod_name}' not found in the current Python environment!")
+                continue
+            
+            if spec.submodule_search_locations:
+                # It's a package (directory)
+                mod_path = Path(spec.submodule_search_locations[0])
+                dest_path = build_dir / mod_name
+                shutil.copytree(mod_path, dest_path, dirs_exist_ok=True)
+                print(f"   - Added installed package: {mod_name}")
+            elif spec.origin:
+                # It's a single file module
+                mod_path = Path(spec.origin)
+                dest_path = build_dir / mod_path.name
+                shutil.copy2(mod_path, dest_path)
+                print(f"   - Added installed file: {mod_path.name}")
 
     # Remove unnecessary directories
     print("🧹 Cleaning up unnecessary files...")
