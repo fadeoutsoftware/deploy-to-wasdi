@@ -15,4 +15,7 @@ dependencies = [
 # This tells pip to create a terminal command called "deploy-to-wasdi"
 # that triggers the main() function in cli.py
 [project.scripts]
-deploy-to-wasdi = "wasdi_deploy.cli:main"
+deploy-to-wasdi = "deploy_to_wasdi.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

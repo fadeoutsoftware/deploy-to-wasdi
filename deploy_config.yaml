@@ -8,7 +8,7 @@ source_dir: "./src"
 # Rename the main entry point to WASDI's required format
 entry_point:
   source: "app.py"
-  target: "main.py" 
+  target: "myProcessor.py" 
 
 # Use this for packages installed in your active Python environment (e.g. editable installs)
 installed_modules:
