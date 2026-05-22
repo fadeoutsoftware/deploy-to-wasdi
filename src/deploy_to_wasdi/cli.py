@@ -2,8 +2,10 @@ import os
 import sys
 import shutil
 import yaml
+import json
 import argparse
 import importlib.util
+import urllib.parse
 from pathlib import Path
 
 def load_config(config_path: str) -> dict:
@@ -129,28 +131,305 @@ def prepare_deployment(config_file: str):
     
     print(f"✅ Preparation complete! Your deployment file is ready at: {final_zip_path}")
 
-def cleanup_deployment(config_file: str, clean_zip: bool):
+
+_WASDI_INITIALIZED = False
+
+def init_wasdi(config: dict, config_dir: Path):
+    """Initializes the WASDI session, ensuring it only happens once per script execution."""
+    global _WASDI_INITIALIZED
+    if _WASDI_INITIALIZED:
+        return
+        
+    import wasdi
+
+    wasdi_config = config.get('wasdi_config', 'local_data/config.json')
+    wasdi_config_path = Path(wasdi_config) if Path(wasdi_config).is_absolute() else config_dir / wasdi_config
+    
+    if not wasdi_config_path.exists():
+        print(f"⚠️  Warning: WASDI config file not found at {wasdi_config_path}. wasdi.init() might prompt for credentials interactively.")
+    
+    print(f"🔑 Initializing WASDI...")
+    try:
+        wasdi.init(str(wasdi_config_path))
+        _WASDI_INITIALIZED = True
+    except Exception as e:
+        print(f"❌ Error obtaining WASDI session: {e}")
+        sys.exit(1)
+
+
+def get_workspace_id(config: dict, config_dir: Path, wasdi_module) -> str:
+    """Attempts to robustly retrieve the active workspace ID."""
+    wid = config.get('workspace_id')
+    if wid:
+        return wid
+        
+    # Attempt to pull the active workspace from the initialized wasdi module
+    try:
+        wid = wasdi_module.getActiveWorkspaceId()
+        if wid:
+            return wid
+    except AttributeError:
+        pass
+        
+    # Fallback to reading the wasdi config file directly
+    wasdi_config = config.get('wasdi_config', 'local_data/config.json')
+    wasdi_config_path = Path(wasdi_config) if Path(wasdi_config).is_absolute() else config_dir / wasdi_config
+    if wasdi_config_path.exists():
+        try:
+            with open(wasdi_config_path, 'r') as f:
+                c = json.load(f)
+                return c.get('workspaceId') or c.get('workspace') or c.get('workspace_id') or ''
+        except Exception:
+            pass
+            
+    return ''
+
+
+def deploy_to_wasdi(config_file: str):
+    """Executes Phase 2: Deploy to WASDI (New Processor)"""
+    try:
+        import requests
+        import wasdi
+    except ImportError as e:
+        print(f"❌ Error: Missing required library for deployment ({e.name}).")
+        print(f"   Please install it using: pip install {e.name}")
+        sys.exit(1)
+
+    config = load_config(config_file)
+    config_dir = Path(config_file).resolve().parent
+    
+    build_dir = Path(config['build_dir'])
+    project_name = config['project_name']
+    zip_name = f"{project_name}.zip"
+    zip_path = build_dir / zip_name
+    
+    if not zip_path.exists():
+        print(f"❌ Error: Deployment archive not found at {zip_path}")
+        print("   Did you run 'prepare' first?")
+        sys.exit(1)
+        
+    print(f"🚀 Starting deployment to WASDI for: {project_name}")
+    
+    init_wasdi(config, config_dir)
+    
+    try:
+        workspace_id = get_workspace_id(config, config_dir, wasdi)
+        if not workspace_id:
+            print("❌ Error: Workspace ID is missing. Please define 'workspace_id' in deploy_config.yaml.")
+            sys.exit(1)
+            
+        # Rely cleanly on the waspy environment state
+        base_url = wasdi.getBaseUrl().rstrip('/')
+        session_id = wasdi.getSessionId()
+    except Exception as e:
+        print(f"❌ Error retrieving WASDI session variables: {e}")
+        sys.exit(1)
+        
+    endpoint = f"{base_url}/processors/uploadprocessor"
+    headers = {'x-session-token': session_id}
+    
+    params_sample = config.get('params_sample')
+    params_file = config.get('params_file', 'local_data/params.json')
+    params_file_path = Path(params_file) if Path(params_file).is_absolute() else config_dir / params_file
+    
+    if params_file_path.exists():
+        print(f"📄 Loading params_sample from {params_file_path.name}...")
+        try:
+            with open(params_file_path, 'r') as pf:
+                # Parse and minify to remove spaces and newlines to shrink URL size
+                params_obj = json.load(pf)
+                params_sample = json.dumps(params_obj, separators=(',', ':'))
+        except json.JSONDecodeError:
+            print("⚠️  Warning: params_sample is not valid JSON. Sending as raw string.")
+            with open(params_file_path, 'r') as pf:
+                params_sample = pf.read().strip()
+    elif params_sample is None:
+        params_sample = '{}'
+    elif isinstance(params_sample, dict):
+        params_sample = json.dumps(params_sample, separators=(',', ':'))
+    elif isinstance(params_sample, str):
+        try:
+            params_sample = json.dumps(json.loads(params_sample), separators=(',', ':'))
+        except json.JSONDecodeError:
+            params_sample = params_sample.strip()
+    
+    # Force integer mapping for public flag
+    is_public_int = int("1" if config.get('public', 0) in [1, True, "true", "True", "1"] else "0")
+
+    # WASDI API explicitly relies on @QueryParam for all metadata.
+    # We pass this cleanly to `params=`, while the ZIP file is delivered via `files=`
+    query_params = {
+        'workspace': str(workspace_id),
+        'name': str(project_name),
+        'version': str(config.get('version', '1')),
+        'description': str(config.get('description', f'{project_name} Processor')),
+        'public': is_public_int
+    }
+
+    proc_type = config.get('processor_type', None)
+    if proc_type:
+        query_params['type'] = str(proc_type)
+    else:
+        query_params['type'] = 'pip_oneshot'
+
+    timeout = config.get('timeout')
+    if (isinstance(timeout, str) and timeout.isdigit()) or isinstance(timeout, int):
+        query_params['timeout'] = int(timeout)
+
+    print(f"query_params prepared for deployment (before adding paramsSample): {query_params}")
+
+    # Let requests handle the URL encoding automatically. 
+    # Manual urllib.parse.quote causes double-encoding, exponentially inflating the URL length.
+    query_params['paramsSample'] = str(params_sample)
+
+    print(f"📡 Uploading new processor {zip_name} to {endpoint}...")
+    
+    try:
+        with open(zip_path, 'rb') as f:
+            files = {'file': (zip_name, f, 'application/zip')}
+            # Send metadata in the URL (params), binary file in the body (files)
+            response = requests.post(endpoint, headers=headers, params=query_params, files=files)
+            
+        if response.status_code == 200:
+            print("✅ Deployment successful!")
+            try:
+                result = response.json()
+                print(f"   Server Response: {result}")
+            except Exception:
+                print(f"   Server Response: {response.text}")
+        else:
+            print(f"❌ Deployment failed with status {response.status_code}")
+            print(f"   Server Response: {response.text}")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"❌ Network error during deployment: {e}")
+        sys.exit(1)
+
+
+def update_to_wasdi(config_file: str):
+    """Executes Phase 2.5: Update existing processor on WASDI"""
+    try:
+        import requests
+        import wasdi
+    except ImportError as e:
+        print(f"❌ Error: Missing required library for update ({e.name}).")
+        sys.exit(1)
+
+    config = load_config(config_file)
+    config_dir = Path(config_file).resolve().parent
+    
+    build_dir = Path(config['build_dir'])
+    project_name = config['project_name']
+    zip_name = f"{project_name}.zip"
+    zip_path = build_dir / zip_name
+    
+    if not zip_path.exists():
+        print(f"❌ Error: Update archive not found at {zip_path}")
+        print("   Did you run 'prepare' first?")
+        sys.exit(1)
+        
+    print(f"🚀 Starting code update to WASDI for existing processor: {project_name}")
+    
+    init_wasdi(config, config_dir)
+    
+    try:
+        workspace_id = get_workspace_id(config, config_dir, wasdi)
+        base_url = wasdi.getBaseUrl().rstrip('/')
+        session_id = wasdi.getSessionId()
+    except Exception as e:
+        print(f"❌ Error retrieving WASDI session variables: {e}")
+        sys.exit(1)
+        
+    endpoint = f"{base_url}/processors/updatefiles"
+    headers = {'x-session-token': session_id}
+    
+    print(f"🔍 Attempting to retrieve processor_id for '{project_name}' from WASDI API ({base_url})...")
+    processor_id = ""
+    try:
+        # Request from workspace processors
+        get_url = f"{base_url}/processors/getworkspaceprocessors"
+        res = requests.get(get_url, headers=headers, params={'workspace': workspace_id})
+
+        if res.status_code == 200:
+            processors = res.json()
+            for p in processors:
+                if p.get('name') == project_name or p.get('processorName') == project_name:
+                    processor_id = p.get('processorId')
+                    print(f"✅ Automatically resolved processor_id: {processor_id}")
+                    break
+        else:
+            print(f"⚠️  Could not fetch processors list (Status {res.status_code} at {get_url}).")
+            
+    except Exception as e:
+        print(f"⚠️  Failed to retrieve processor_id automatically: {e}")
+        
+    if not processor_id:
+        print(f"⚠️  Could not find an existing processor named '{project_name}'.")
+        print("   Falling back to 'deploy' to create a new processor...")
+        deploy_to_wasdi(config_file)
+        return
+    
+    # Send metadata to the URL query string (@QueryParam), just like deployment
+    query_params = {
+        'workspace': str(workspace_id),
+        'processorId': str(processor_id),
+        'name': str(project_name)
+    }
+
+    print(f"📡 Updating {zip_name} files at {endpoint}...")
+    
+    try:
+        with open(zip_path, 'rb') as f:
+            files = {'file': (zip_name, f, 'application/zip')}
+            response = requests.post(endpoint, headers=headers, params=query_params, files=files)
+            
+        if response.status_code == 200:
+            print("✅ Update successful!")
+            try:
+                result = response.json()
+                print(f"   Server Response: {result}")
+            except Exception:
+                print(f"   Server Response: {response.text}")
+        else:
+            print(f"❌ Update failed with status {response.status_code}")
+            print(f"   Server Response: {response.text}")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"❌ Network error during update: {e}")
+        sys.exit(1)
+
+
+def cleanup_deployment(config_file: str):
     """Executes Phase 3: Cleanup"""
     config = load_config(config_file)
     build_dir = Path(config['build_dir'])
     zip_name = f"{config['project_name']}.zip"
     
+    keep_zip = config.get('keep_zip', False)
+    remove_build_dir = config.get('remove_build_dir', False)
+    
     print(f"🧹 Starting cleanup for: {config['project_name']}")
     
     if build_dir.exists():
-        if clean_zip:
-            # Delete the entire directory including the zip
+        if remove_build_dir and not keep_zip:
             shutil.rmtree(build_dir)
             print(f"   - Removed entire build directory: {build_dir}")
         else:
-            # Delete everything inside EXCEPT the zip file
+            if remove_build_dir and keep_zip:
+                print(f"   ⚠️ Warning: 'remove_build_dir' is True but 'keep_zip' is also True. Preserving build directory to keep the zip file.")
+            
             for item in build_dir.iterdir():
-                if item.name != zip_name:
-                    if item.is_file():
-                        item.unlink()
-                    elif item.is_dir():
-                        shutil.rmtree(item)
-            print(f"   - Cleaned build artifacts but kept: {build_dir / zip_name}")
+                if keep_zip and item.name == zip_name:
+                    continue
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            
+            kept_msg = f" but kept {zip_name}" if keep_zip else ""
+            print(f"   - Cleaned contents of {build_dir}{kept_msg}")
     else:
         print(f"   - Build directory {build_dir} not found. Skipping.")
             
@@ -158,23 +437,36 @@ def cleanup_deployment(config_file: str, clean_zip: bool):
 
 def main():
     parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+    subparsers = parser.add_subparsers(dest="command", required=False)
     
-    # Subparser for "prepare"
     prep_parser = subparsers.add_parser("prepare", help="Prepare the application for deployment")
     prep_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
     
-    # Subparser for "cleanup"
+    deploy_parser = subparsers.add_parser("deploy", help="Deploy the prepared zip file to WASDI as a new processor")
+    deploy_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+    
+    update_parser = subparsers.add_parser("update", help="Update the files of an existing processor on WASDI")
+    update_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+    
     clean_parser = subparsers.add_parser("cleanup", help="Clean up build artifacts")
     clean_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    clean_parser.add_argument("--clean-zip", action="store_true", help="Also delete the generated zip file")
     
     args = parser.parse_args()
     
-    if args.command == "prepare":
+    if args.command is None:
+        print("🔄 No command provided. Executing full pipeline: cleanup -> prepare -> update")
+        cleanup_deployment(args.config)
         prepare_deployment(args.config)
+        update_to_wasdi(args.config)
+    elif args.command == "prepare":
+        prepare_deployment(args.config)
+    elif args.command == "deploy":
+        deploy_to_wasdi(args.config)
+    elif args.command == "update":
+        update_to_wasdi(args.config)
     elif args.command == "cleanup":
-        cleanup_deployment(args.config, args.clean_zip)
+        cleanup_deployment(args.config)
 
 if __name__ == "__main__":
     main()
