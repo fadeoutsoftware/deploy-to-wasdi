@@ -133,6 +133,7 @@ def prepare_deployment(config_file: str):
 
 
 _WASDI_INITIALIZED = False
+_DEPLOYED_PROCESSORS_CACHE = None
 
 def init_wasdi(config: dict, config_dir: Path):
     """Initializes the WASDI session, ensuring it only happens once per script execution."""
@@ -184,6 +185,54 @@ def get_workspace_id(config: dict, config_dir: Path, wasdi_module) -> str:
             
     return ''
 
+def get_processor_info(config_file: str) -> dict:
+    """
+    Fetches the processor information from WASDI.
+    Caches the list of deployed processors to ensure the REST endpoint is hit only once.
+    """
+    global _DEPLOYED_PROCESSORS_CACHE
+    
+    try:
+        import requests
+        import wasdi
+    except ImportError:
+        return None
+
+    config = load_config(config_file)
+    config_dir = Path(config_file).resolve().parent
+    project_name = config['project_name']
+    
+    init_wasdi(config, config_dir)
+    
+    if _DEPLOYED_PROCESSORS_CACHE is None:
+        try:
+            workspace_id = get_workspace_id(config, config_dir, wasdi)
+            base_url = wasdi.getBaseUrl().rstrip('/')
+            session_id = wasdi.getSessionId()
+        except Exception as e:
+            print(f"❌ Error retrieving WASDI session variables: {e}")
+            return None
+            
+        headers = {'x-session-token': session_id}
+        get_url = f"{base_url}/processors/getdeployed"
+        
+        try:
+            res = requests.get(get_url, headers=headers, params={'workspace': workspace_id})
+            if res.status_code == 200:
+                _DEPLOYED_PROCESSORS_CACHE = res.json()
+            else:
+                print(f"⚠️ Could not fetch processors list (Status {res.status_code} at {get_url}).")
+                _DEPLOYED_PROCESSORS_CACHE = []
+        except Exception as e:
+            print(f"⚠️ Failed to retrieve processor_id automatically: {e}")
+            _DEPLOYED_PROCESSORS_CACHE = []
+
+    # Find the specific processor
+    for p in _DEPLOYED_PROCESSORS_CACHE:
+        if p.get('name') == project_name or p.get('processorName') == project_name:
+            return p
+            
+    return None
 
 def deploy_to_wasdi(config_file: str):
     """Executes Phase 2: Deploy to WASDI (New Processor)"""
@@ -331,8 +380,6 @@ def update_to_wasdi(config_file: str):
         
     print(f"🚀 Starting code update to WASDI for existing processor: {project_name}")
     
-    init_wasdi(config, config_dir)
-    
     try:
         workspace_id = get_workspace_id(config, config_dir, wasdi)
         base_url = wasdi.getBaseUrl().rstrip('/')
@@ -345,31 +392,17 @@ def update_to_wasdi(config_file: str):
     headers = {'x-session-token': session_id}
     
     print(f"🔍 Attempting to retrieve processor_id for '{project_name}' from WASDI API ({base_url})...")
-    processor_id = ""
-    try:
-        # Request from workspace processors
-        get_url = f"{base_url}/processors/getworkspaceprocessors"
-        res = requests.get(get_url, headers=headers, params={'workspace': workspace_id})
-
-        if res.status_code == 200:
-            processors = res.json()
-            for p in processors:
-                if p.get('name') == project_name or p.get('processorName') == project_name:
-                    processor_id = p.get('processorId')
-                    print(f"✅ Automatically resolved processor_id: {processor_id}")
-                    break
-        else:
-            print(f"⚠️  Could not fetch processors list (Status {res.status_code} at {get_url}).")
-            
-    except Exception as e:
-        print(f"⚠️  Failed to retrieve processor_id automatically: {e}")
+    processor_info = get_processor_info(config_file)
         
-    if not processor_id:
+    if not processor_info:
         print(f"⚠️  Could not find an existing processor named '{project_name}'.")
         print("   Falling back to 'deploy' to create a new processor...")
         deploy_to_wasdi(config_file)
         return
     
+    processor_id = processor_info.get('processorId')
+    print(f"✅ Resolved processor_id: {processor_id}")
+
     # Send metadata to the URL query string (@QueryParam), just like deployment
     query_params = {
         'workspace': str(workspace_id),
@@ -398,6 +431,87 @@ def update_to_wasdi(config_file: str):
             
     except Exception as e:
         print(f"❌ Network error during update: {e}")
+        sys.exit(1)
+
+
+def update_params(config_file: str):
+    """Executes Phase 2.6: Update parameters sample of an existing processor via HTTP POST body"""
+    try:
+        import requests
+        import wasdi
+    except ImportError as e:
+        print(f"❌ Error: Missing required library ({e.name}).")
+        sys.exit(1)
+
+    config = load_config(config_file)
+    config_dir = Path(config_file).resolve().parent
+    project_name = config['project_name']
+    
+    print(f"🚀 Starting params update to WASDI for existing processor: {project_name}")
+    
+    try:
+        workspace_id = get_workspace_id(config, config_dir, wasdi)
+        base_url = wasdi.getBaseUrl().rstrip('/')
+        session_id = wasdi.getSessionId()
+    except Exception as e:
+        print(f"❌ Error retrieving WASDI session variables: {e}")
+        sys.exit(1)
+        
+    headers = {'x-session-token': session_id, 'Content-Type': 'application/json'}
+    
+    print(f"🔍 Fetching existing processor details for '{project_name}' from WASDI API ({base_url})...")
+    processor_view_model = get_processor_info(config_file)
+        
+    if not processor_view_model:
+        print(f"❌ Error: Could not find an existing processor named '{project_name}'. Please deploy it first.")
+        sys.exit(1)
+    
+    print(f"✅ Found existing processor_id: {processor_view_model.get('processorId')}")
+
+    # Prepare paramsSample (Since it goes in the JSON body, we don't need to minify it)
+    params_sample = config.get('params_sample')
+    params_file = config.get('params_file', 'local_data/params.json')
+    params_file_path = Path(params_file) if Path(params_file).is_absolute() else config_dir / params_file
+    
+    if params_file_path.exists():
+        print(f"📄 Loading params_sample from {params_file_path.name}...")
+        with open(params_file_path, 'r') as pf:
+            params_sample = pf.read().strip()
+    elif params_sample is None:
+        params_sample = '{}'
+    elif isinstance(params_sample, dict):
+        print(f'params_sample provided as dict in config, converting to JSON string...')
+        params_sample = json.dumps(params_sample, indent=2)
+
+    print(f"   - Loaded params_sample: {params_sample[:300]}{'...' if len(params_sample) > 300 else ''}")
+        
+    # Update the retrieved view model dictionary
+    processor_view_model['paramsSample'] = str(params_sample)
+
+    # We also update timeout if provided
+    timeout = config.get('timeout')
+    if (isinstance(timeout, str) and timeout.isdigit()) or isinstance(timeout, int):
+        processor_view_model['minuteTimeout'] = int(timeout)
+        
+    update_url = f"{base_url}/processors/update"
+    print(f"📡 Sending updated DeployedProcessorViewModel to {update_url}...")
+    
+    query_params = {
+        'processorId': str(processor_view_model.get('processorId'))
+    }
+    try:
+        # Pass the dictionary directly to json=, requests handles JSON encoding automatically
+        response = requests.post(update_url, params=query_params, headers=headers, json=processor_view_model)
+        
+        if response.status_code == 200:
+            print("✅ Parameters update successful!")
+        else:
+            print(f"❌ Parameters update failed with status {response.status_code}")
+            print(f"   Server Response: {response.text}")
+            sys.exit(1)
+            
+    except Exception as e:
+        print(f"❌ Network error during params update: {e}")
         sys.exit(1)
 
 
@@ -436,6 +550,7 @@ def cleanup_deployment(config_file: str):
     print("✅ Cleanup complete!")
 
 def main():
+    print("🚀 Welcome to the WASDI Deployment Utility!")
     parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
     parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
     subparsers = parser.add_subparsers(dest="command", required=False)
@@ -449,22 +564,39 @@ def main():
     update_parser = subparsers.add_parser("update", help="Update the files of an existing processor on WASDI")
     update_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
     
+    update_params_parser = subparsers.add_parser("params", help="Update the parameters sample of an existing processor via HTTP POST body")
+    update_params_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+    
     clean_parser = subparsers.add_parser("cleanup", help="Clean up build artifacts")
     clean_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
     
     args = parser.parse_args()
     
     if args.command is None:
-        print("🔄 No command provided. Executing full pipeline: cleanup -> prepare -> update")
+        print("🔄 No command provided. Executing adaptive deployment pipeline...")
         cleanup_deployment(args.config)
         prepare_deployment(args.config)
-        update_to_wasdi(args.config)
+        
+        print("\n🔍 Checking if processor is already deployed on WASDI...")
+        processor_info = get_processor_info(args.config)
+        
+        if processor_info:
+            print(f"✅ Processor '{processor_info.get('processorName', processor_info.get('name'))}' already exists.")
+            print("   Proceeding to update parameters and code...")
+            update_params(args.config)
+            update_to_wasdi(args.config)
+        else:
+            print("🆕 Processor not found on WASDI. Proceeding to deploy as a new processor...")
+            deploy_to_wasdi(args.config)
+            
     elif args.command == "prepare":
         prepare_deployment(args.config)
     elif args.command == "deploy":
         deploy_to_wasdi(args.config)
     elif args.command == "update":
         update_to_wasdi(args.config)
+    elif args.command == "params":
+        update_params(args.config)
     elif args.command == "cleanup":
         cleanup_deployment(args.config)
 
