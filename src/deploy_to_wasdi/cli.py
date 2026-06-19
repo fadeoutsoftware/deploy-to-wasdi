@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import urllib.parse
 from pathlib import Path
+from datetime import datetime
 
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
@@ -43,11 +44,13 @@ def prepare_deployment(config_file: str):
         print(f"❌ Error: Source directory '{source_dir}' does not exist.")
         sys.exit(1)
     
-    if build_dir.exists():
-        shutil.rmtree(build_dir)
+    # We ensure the build directory exists and overwrite files instead of wiping it,
+    # which avoids issues with file locks and allows incremental updates.
+    if not build_dir.exists():
+        build_dir.mkdir(parents=True, exist_ok=True)
         
-    print(f"📂 Copying source code from {source_dir} to {build_dir}...")
-    shutil.copytree(source_dir, build_dir)
+    print(f"📂 Copying/updating source code from {source_dir} to {build_dir}...")
+    shutil.copytree(source_dir, build_dir, dirs_exist_ok=True)
     
     # Verify and Rename entry point
     entry_config = config.get('entry_point')
@@ -60,7 +63,8 @@ def prepare_deployment(config_file: str):
             sys.exit(1)
             
         if entry_source != entry_target:
-            entry_source.rename(entry_target)
+            # Use replace instead of rename to ensure it safely overwrites if entry_target already exists
+            entry_source.replace(entry_target)
             print(f"🔄 Renamed {entry_source.name} to {entry_target.name}")
         else:
             print(f"✅ Main entry point verified: {entry_target.name}")
@@ -191,6 +195,8 @@ def get_processor_info(config_file: str) -> dict:
     Caches the list of deployed processors to ensure the REST endpoint is hit only once.
     """
     global _DEPLOYED_PROCESSORS_CACHE
+
+    print(f'Trying to retrieve processor information from WASDI API for config: {config_file}...')
     
     try:
         import requests
@@ -310,7 +316,6 @@ def deploy_to_wasdi(config_file: str):
     query_params = {
         'workspace': str(workspace_id),
         'name': str(project_name),
-        'version': str(config.get('version', '1')),
         'description': str(config.get('description', f'{project_name} Processor')),
         'public': is_public_int
     }
@@ -407,7 +412,8 @@ def update_to_wasdi(config_file: str):
     query_params = {
         'workspace': str(workspace_id),
         'processorId': str(processor_id),
-        'name': str(project_name)
+        'name': str(project_name),
+        'file': str(zip_name)
     }
 
     print(f"📡 Updating {zip_name} files at {endpoint}...")
@@ -550,55 +556,64 @@ def cleanup_deployment(config_file: str):
     print("✅ Cleanup complete!")
 
 def main():
+    start_time = datetime.now()
+    print(f"🕒 Execution started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("🚀 Welcome to the WASDI Deployment Utility!")
-    parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
-    parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    subparsers = parser.add_subparsers(dest="command", required=False)
     
-    prep_parser = subparsers.add_parser("prepare", help="Prepare the application for deployment")
-    prep_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    
-    deploy_parser = subparsers.add_parser("deploy", help="Deploy the prepared zip file to WASDI as a new processor")
-    deploy_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    
-    update_parser = subparsers.add_parser("update", help="Update the files of an existing processor on WASDI")
-    update_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    
-    update_params_parser = subparsers.add_parser("params", help="Update the parameters sample of an existing processor via HTTP POST body")
-    update_params_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    
-    clean_parser = subparsers.add_parser("cleanup", help="Clean up build artifacts")
-    clean_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-    
-    args = parser.parse_args()
-    
-    if args.command is None:
-        print("🔄 No command provided. Executing adaptive deployment pipeline...")
-        cleanup_deployment(args.config)
-        prepare_deployment(args.config)
+    try:
+        parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
+        parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+        subparsers = parser.add_subparsers(dest="command", required=False)
         
-        print("\n🔍 Checking if processor is already deployed on WASDI...")
-        processor_info = get_processor_info(args.config)
+        prep_parser = subparsers.add_parser("prepare", help="Prepare the application for deployment")
+        prep_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
         
-        if processor_info:
-            print(f"✅ Processor '{processor_info.get('processorName', processor_info.get('name'))}' already exists.")
-            print("   Proceeding to update parameters and code...")
-            update_params(args.config)
-            update_to_wasdi(args.config)
-        else:
-            print("🆕 Processor not found on WASDI. Proceeding to deploy as a new processor...")
-            deploy_to_wasdi(args.config)
+        deploy_parser = subparsers.add_parser("deploy", help="Deploy the prepared zip file to WASDI as a new processor")
+        deploy_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+        
+        update_parser = subparsers.add_parser("update", help="Update the files of an existing processor on WASDI")
+        update_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+        
+        update_params_parser = subparsers.add_parser("params", help="Update the parameters sample of an existing processor via HTTP POST body")
+        update_params_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+        
+        clean_parser = subparsers.add_parser("cleanup", help="Clean up build artifacts")
+        clean_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
+        
+        args = parser.parse_args()
+        
+        if args.command is None:
+            print("🔄 No command provided. Executing adaptive deployment pipeline...")
+            cleanup_deployment(args.config)
+            prepare_deployment(args.config)
             
-    elif args.command == "prepare":
-        prepare_deployment(args.config)
-    elif args.command == "deploy":
-        deploy_to_wasdi(args.config)
-    elif args.command == "update":
-        update_to_wasdi(args.config)
-    elif args.command == "params":
-        update_params(args.config)
-    elif args.command == "cleanup":
-        cleanup_deployment(args.config)
+            print("\n🔍 Checking if processor is already deployed on WASDI...")
+            processor_info = get_processor_info(args.config)
+            
+            if processor_info:
+                print(f"✅ Processor '{processor_info.get('processorName', processor_info.get('name'))}' already exists.")
+                print("   Proceeding to update parameters and code...")
+                # update_params(args.config)
+                update_to_wasdi(args.config)
+            else:
+                print("🆕 Processor not found on WASDI. Proceeding to deploy as a new processor...")
+                deploy_to_wasdi(args.config)
+                
+        elif args.command == "prepare":
+            prepare_deployment(args.config)
+        elif args.command == "deploy":
+            deploy_to_wasdi(args.config)
+        elif args.command == "update":
+            update_to_wasdi(args.config)
+        elif args.command == "params":
+            update_params(args.config)
+        elif args.command == "cleanup":
+            cleanup_deployment(args.config)
+
+    finally:
+        end_time = datetime.now()
+        print(f"\n🏁 Execution finished at: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"⏱️ Total duration: {end_time - start_time}")
 
 if __name__ == "__main__":
     main()

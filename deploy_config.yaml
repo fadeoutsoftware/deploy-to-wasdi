@@ -6,7 +6,6 @@ build_dir: "./.deploy_build"  # Now using a hidden directory
 source_dir: "./src/my_wasdi_app"
 
 description: "A WASDI processor for XYZ functionality"
-version: "1.0.0"
 # timeout in minutes
 timeout: 180
 
