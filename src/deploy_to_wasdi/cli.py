@@ -558,7 +558,7 @@ def cleanup_deployment(config_file: str):
 def main():
     start_time = datetime.now()
     print(f"🕒 Execution started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print("🚀 Welcome to the WASDI Deployment Utility!")
+    print("🚀 Welcome to the WASDI Deployment Utility! v.1.0")
     
     try:
         parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
