@@ -9,6 +9,11 @@ import urllib.parse
 from pathlib import Path
 from datetime import datetime
 
+def resolve_config_path(path_value: str | Path, config_dir: Path) -> Path:
+    """Resolves relative configuration paths from the configuration file's directory."""
+    path = Path(path_value)
+    return path if path.is_absolute() else config_dir / path
+
 def load_config(config_path: str) -> dict:
     """Loads the YAML configuration file."""
     config_file = Path(config_path)
@@ -33,9 +38,10 @@ def clean_unnecessary_files(target_dir: Path, exclude_patterns: list):
 def prepare_deployment(config_file: str):
     """Executes Phase 1: Prepare"""
     config = load_config(config_file)
-    
-    build_dir = Path(config['build_dir'])
-    source_dir = Path(config['source_dir'])
+    config_dir = Path(config_file).resolve().parent
+
+    build_dir = resolve_config_path(config['build_dir'], config_dir)
+    source_dir = resolve_config_path(config['source_dir'], config_dir)
     
     print(f"🚀 Starting deployment preparation for: {config['project_name']}")
     
@@ -74,7 +80,7 @@ def prepare_deployment(config_file: str):
     if custom_modules:
         print("📦 Copying custom modules by path...")
         for mod_path_str in custom_modules:
-            mod_path = Path(mod_path_str)
+            mod_path = resolve_config_path(mod_path_str, config_dir)
             if mod_path.is_file():
                 shutil.copy2(mod_path, build_dir / mod_path.name)
                 print(f"   - Added file: {mod_path.name}")
@@ -148,7 +154,7 @@ def init_wasdi(config: dict, config_dir: Path):
     import wasdi
 
     wasdi_config = config.get('wasdi_config', 'local_data/config.json')
-    wasdi_config_path = Path(wasdi_config) if Path(wasdi_config).is_absolute() else config_dir / wasdi_config
+    wasdi_config_path = resolve_config_path(wasdi_config, config_dir)
     
     if not wasdi_config_path.exists():
         print(f"⚠️  Warning: WASDI config file not found at {wasdi_config_path}. wasdi.init() might prompt for credentials interactively.")
@@ -178,7 +184,7 @@ def get_workspace_id(config: dict, config_dir: Path, wasdi_module) -> str:
         
     # Fallback to reading the wasdi config file directly
     wasdi_config = config.get('wasdi_config', 'local_data/config.json')
-    wasdi_config_path = Path(wasdi_config) if Path(wasdi_config).is_absolute() else config_dir / wasdi_config
+    wasdi_config_path = resolve_config_path(wasdi_config, config_dir)
     if wasdi_config_path.exists():
         try:
             with open(wasdi_config_path, 'r') as f:
@@ -189,7 +195,7 @@ def get_workspace_id(config: dict, config_dir: Path, wasdi_module) -> str:
             
     return ''
 
-def get_processor_info(config_file: str) -> dict:
+def get_processor_info(config_file: str) -> dict | None:
     """
     Fetches the processor information from WASDI.
     Caches the list of deployed processors to ensure the REST endpoint is hit only once.
@@ -253,7 +259,7 @@ def deploy_to_wasdi(config_file: str):
     config = load_config(config_file)
     config_dir = Path(config_file).resolve().parent
     
-    build_dir = Path(config['build_dir'])
+    build_dir = resolve_config_path(config['build_dir'], config_dir)
     project_name = config['project_name']
     zip_name = f"{project_name}.zip"
     zip_path = build_dir / zip_name
@@ -285,7 +291,7 @@ def deploy_to_wasdi(config_file: str):
     
     params_sample = config.get('params_sample')
     params_file = config.get('params_file', 'local_data/params.json')
-    params_file_path = Path(params_file) if Path(params_file).is_absolute() else config_dir / params_file
+    params_file_path = resolve_config_path(params_file, config_dir)
     
     if params_file_path.exists():
         print(f"📄 Loading params_sample from {params_file_path.name}...")
@@ -373,7 +379,7 @@ def update_to_wasdi(config_file: str):
     config = load_config(config_file)
     config_dir = Path(config_file).resolve().parent
     
-    build_dir = Path(config['build_dir'])
+    build_dir = resolve_config_path(config['build_dir'], config_dir)
     project_name = config['project_name']
     zip_name = f"{project_name}.zip"
     zip_path = build_dir / zip_name
@@ -384,7 +390,9 @@ def update_to_wasdi(config_file: str):
         sys.exit(1)
         
     print(f"🚀 Starting code update to WASDI for existing processor: {project_name}")
-    
+
+    init_wasdi(config, config_dir)
+
     try:
         workspace_id = get_workspace_id(config, config_dir, wasdi)
         base_url = wasdi.getBaseUrl().rstrip('/')
@@ -454,7 +462,9 @@ def update_params(config_file: str):
     project_name = config['project_name']
     
     print(f"🚀 Starting params update to WASDI for existing processor: {project_name}")
-    
+
+    init_wasdi(config, config_dir)
+
     try:
         workspace_id = get_workspace_id(config, config_dir, wasdi)
         base_url = wasdi.getBaseUrl().rstrip('/')
@@ -477,7 +487,7 @@ def update_params(config_file: str):
     # Prepare paramsSample (Since it goes in the JSON body, we don't need to minify it)
     params_sample = config.get('params_sample')
     params_file = config.get('params_file', 'local_data/params.json')
-    params_file_path = Path(params_file) if Path(params_file).is_absolute() else config_dir / params_file
+    params_file_path = resolve_config_path(params_file, config_dir)
     
     if params_file_path.exists():
         print(f"📄 Loading params_sample from {params_file_path.name}...")
@@ -524,7 +534,8 @@ def update_params(config_file: str):
 def cleanup_deployment(config_file: str):
     """Executes Phase 3: Cleanup"""
     config = load_config(config_file)
-    build_dir = Path(config['build_dir'])
+    config_dir = Path(config_file).resolve().parent
+    build_dir = resolve_config_path(config['build_dir'], config_dir)
     zip_name = f"{config['project_name']}.zip"
     
     keep_zip = config.get('keep_zip', False)
@@ -555,31 +566,54 @@ def cleanup_deployment(config_file: str):
             
     print("✅ Cleanup complete!")
 
+def create_parser() -> argparse.ArgumentParser:
+    """Builds the command-line parser with a shared config option."""
+    def add_config_argument(target_parser, default):
+        target_parser.add_argument(
+            "-c",
+            "--config",
+            help="Path to YAML config file",
+            default=default,
+        )
+
+    parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
+    add_config_argument(parser, "deploy_config.yaml")
+    subparsers = parser.add_subparsers(dest="command", required=False)
+
+    prepare_parser = subparsers.add_parser(
+        "prepare",
+        help="Prepare the application for deployment",
+    )
+    add_config_argument(prepare_parser, argparse.SUPPRESS)
+    deploy_parser = subparsers.add_parser(
+        "deploy",
+        help="Deploy the prepared zip file to WASDI as a new processor",
+    )
+    add_config_argument(deploy_parser, argparse.SUPPRESS)
+    update_parser = subparsers.add_parser(
+        "update",
+        help="Update the files of an existing processor on WASDI",
+    )
+    add_config_argument(update_parser, argparse.SUPPRESS)
+    params_parser = subparsers.add_parser(
+        "params",
+        help="Update the parameters sample of an existing processor via HTTP POST body",
+    )
+    add_config_argument(params_parser, argparse.SUPPRESS)
+    cleanup_parser = subparsers.add_parser(
+        "cleanup",
+        help="Clean up build artifacts",
+    )
+    add_config_argument(cleanup_parser, argparse.SUPPRESS)
+    return parser
+
 def main():
     start_time = datetime.now()
     print(f"🕒 Execution started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("🚀 Welcome to the WASDI Deployment Utility! v.1.0")
     
     try:
-        parser = argparse.ArgumentParser(description="WASDI Deployment Utility")
-        parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        subparsers = parser.add_subparsers(dest="command", required=False)
-        
-        prep_parser = subparsers.add_parser("prepare", help="Prepare the application for deployment")
-        prep_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        
-        deploy_parser = subparsers.add_parser("deploy", help="Deploy the prepared zip file to WASDI as a new processor")
-        deploy_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        
-        update_parser = subparsers.add_parser("update", help="Update the files of an existing processor on WASDI")
-        update_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        
-        update_params_parser = subparsers.add_parser("params", help="Update the parameters sample of an existing processor via HTTP POST body")
-        update_params_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        
-        clean_parser = subparsers.add_parser("cleanup", help="Clean up build artifacts")
-        clean_parser.add_argument("-c", "--config", default="deploy_config.yaml", help="Path to YAML config file")
-        
+        parser = create_parser()
         args = parser.parse_args()
         
         if args.command is None:

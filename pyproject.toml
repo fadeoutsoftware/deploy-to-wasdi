@@ -10,6 +10,13 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "PyYAML>=6.0",
+    "requests",
+    "wasdi",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
 ]
 
 # This tells pip to create a terminal command called "deploy-to-wasdi"

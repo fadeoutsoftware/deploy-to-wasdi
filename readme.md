@@ -21,7 +21,21 @@ Creates the build directory, copies modules, strips unnecessary files, and gener
 
 ### Deploy
 
-Sorry, unsupported at the moment. Will do. For the moment, just drag and drop that zip of yours
+Uploads the prepared archive as a new WASDI processor:
+
+`deploy-to-wasdi deploy -c deploy_config.yaml`
+
+### Update
+
+Updates the archive files for an existing WASDI processor. If no matching processor exists, the command creates one:
+
+`deploy-to-wasdi update -c deploy_config.yaml`
+
+### Update Parameters
+
+Updates the parameter sample configured through `params_file` or `params_sample`:
+
+`deploy-to-wasdi params -c deploy_config.yaml`
 
 ### Cleanup
 
@@ -29,7 +43,4 @@ Removes the build directory created during preparation:
 
 `deploy-to-wasdi cleanup -c deploy_config.yaml`
 
-
-To also delete the generated .zip file:
-
-`deploy-to-wasdi cleanup -c deploy_config.yaml --clean-zip`
+Cleanup behavior is configured in `deploy_config.yaml`: set `keep_zip: true` to retain the archive, or `remove_build_dir: true` to remove the build directory when the archive is not being retained.
