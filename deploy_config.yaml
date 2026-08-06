@@ -28,6 +28,7 @@ exclude_patterns:
   - "*.pyc"
   - ".env"
   - ".git"
+# bad hack, but it does the job - until I fix issue #3 https://github.com/fadeoutsoftware/deploy-to-wasdi/issues/3
   - ".deploy_build"
 
 # Requirements to inject into pip.txt
