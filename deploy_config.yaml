@@ -28,6 +28,7 @@ exclude_patterns:
   - "*.pyc"
   - ".env"
   - ".git"
+  - ".deploy_build"
 
 # Requirements to inject into pip.txt
 pip_packages:
